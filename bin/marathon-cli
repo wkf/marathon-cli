@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+
+set -o errexit -o pipefail -o nounset
+
+NAME=marathon
+VERSION=0.0.1
+
+function main {
+  local help=\
+"Usage: $NAME [options] <command> [<arguments>...]
+
+Options:
+  -h, --help      print help
+  -v, --version   print version
+  --verbose       print commands as they are executed
+  --trace         expand and print commands as they are executed
+  -H HOST, --host=HOST
+                  provide host, ex: https://marathon.example.com
+  -u USER, --username=USER
+                  provide username
+  -p PASS, --password=PASS
+                  provide password
+
+Commands:
+  app             manipulate apps
+  group           manipulate groups
+  deployment      manipulate deployments"
+
+  while [[ $# > 0 ]]; do
+    case "$1" in
+      --) shift; break ;;
+      -h|--help) echo "$help"; exit 1 ;;
+      -v|--version) echo "$VERSION"; exit 1 ;;
+      --trace) set -o xtrace ;;
+      --verbose) set -o verbose ;;
+      -H) MARATHON_HOST="$2"; shift ;;
+      --host=*) MARATHON_HOST="${1#--host=*}" ;;
+      -u) MARATHON_USER="$2"; shift ;;
+      --username=*) MARATHON_USER="${1#--username=*}" ;;
+      -p) MARATHON_PASS="$2"; shift ;;
+      --password=*) MARATHON_PASS="${1#--password=*}" ;;
+      -*) error "unknown option" \"$1\"; exit 1 ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  MARATHON_HOST="${MARATHON_HOST+$MARATHON_HOST}"
+  MARATHON_USER="${MARATHON_USER+$MARATHON_USER}"
+  MARATHON_PASS="${MARATHON_PASS+$MARATHON_PASS}"
+
+  [[ -n $MARATHON_HOST ]] || { error "missing --host"; exit 1; }
+  [[ -n $MARATHON_USER ]] || unset MARATHON_USER
+  [[ -n $MARATHON_PASS ]] || unset MARATHON_PASS
+
+  case "${1+$1}" in
+    app) RESOURCE=app resource "${@:2}" ;;
+    group) RESOURCE=group resource "${@:2}" ;;
+    deployment) RESOURCE=deployment resource "${@:2}" ;;
+    "") error "missing <command>"; exit 1 ;;
+    *) error "unknown <command>" \"$1\"; exit 1 ;;
+  esac
+}
+
+function resource {
+  local help=\
+"Usage: $NAME $RESOURCE [options] <command> [<arguments>...]
+
+Options:
+  -h, --help    print help
+
+Commands:
+  show          show $RESOURCE
+  create        create $RESOURCE
+  update        update $RESOURCE
+  delete        delete $RESOURCE
+  wait          wait for $RESOURCE"
+
+  case "${1+$1}" in
+    -h|--help) echo "$help"; exit 1 ;;
+    -*) error "unknown option" \"$1\"; exit 1 ;;
+    show) show "${@:2}" ;;
+    create) create "${@:2}" ;;
+    update) update "${@:2}" ;;
+    delete) delete "${@:2}" ;;
+    wait) wait "${@:2}" ;;
+    "") error "missing <command>"; exit 1 ;;
+    *) error "unknown <command>" \"$1\"; exit 1 ;;
+  esac
+}
+
+function show {
+  local help=\
+"Usage: $NAME $RESOURCE show [options] [<id>]
+
+Options:
+  -h, --help    print help"
+
+  case "${1+$1}" in
+    -h|--help) echo "$help"; exit 1 ;;
+  esac
+
+  request GET "v2/${RESOURCE}s${1+$1}"
+}
+
+function create {
+  local data=""
+  local help=\
+"Usage: $NAME $RESOURCE create [options] [<data>]
+
+Options:
+  -h, --help    print help
+  -             read $RESOURCE data from stdin
+  --file=FILE   read $RESOURCE data from file"
+
+  while [[ $# > 0 ]]; do
+    case "$1" in
+      -) data="$(cat)" ;;
+      --file=*) data="$(cat "${1#--file=*}")" ;;
+      -h|--help) echo "$help"; exit 1 ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  [[ -n ${1+$1} ]] && data="$1"
+
+  if [[ -n "$data" ]]; then
+    request POST "v2/${RESOURCE}s" "$data"
+  else
+    error "missing $RESOURCE data"
+  fi
+}
+
+function update {
+  local data=""
+  local create=""
+  local quiet=""
+  local force=""
+  local help=\
+"Usage: $NAME $RESOURCE update [options] <id> [<data>]
+
+Options:
+  -h, --help    print help
+  -c, --create  create $RESOURCE if nonexistent
+  -q, --quiet   don't complain about empty input
+  -f, --force   force update
+  -             read $RESOURCE data from stdin
+  --file=FILE   read $RESOURCE data from file"
+
+  while [[ $# > 0 ]]; do
+    case "$1" in
+      -) data="$(cat)" ;;
+      --file=*) data="$(cat "${1#--file=*}")" ;;
+      -f|--force) force=y ;;
+      -c|--create) create=y ;;
+      -q|--quiet) quiet=y ;;
+      -h|--help) echo "$help"; exit 1 ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  [[ -n ${2+$2} ]] && data="$2"
+
+  [[ -n $force ]] || unset force
+
+  if [[ -n $data && -n ${1+$1} ]]; then
+    if [[ -n $create ]]; then
+      if (request GET "v2/${RESOURCE}s$1" 1>/dev/null 2>&1); then
+        request PUT "v2/${RESOURCE}s$1${force+?force=true}" "$data"
+      else
+        request POST "v2/${RESOURCE}s" "$data"
+      fi
+    else
+      request PUT "v2/${RESOURCE}s$1${force+?force=true}" "$data"
+    fi
+  else
+    [[ -n $quiet ]] || error "missing $RESOURCE data or <id>"
+  fi
+}
+
+function delete {
+  local force=""
+  local help=\
+"Usage: $NAME $RESOURCE delete [options] <id>
+
+Options:
+  -h, --help    print help
+  -f, --force   force delete"
+
+  while [[ $# > 0 ]]; do
+    case "$1" in
+      -f|--force) force=y ;;
+      -h|--help) echo "$help"; exit 1 ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  [[ -n $force ]] || unset force
+
+  if [[ -n $1 ]]; then
+    request DELETE "v2/${RESOURCE}s/$1${force+?force=true}"
+  else
+    error "missing <id>"
+  fi
+}
+
+function wait {
+  local start=$(date +%s)
+  local seconds=0
+  local timeout=120
+  local help=\
+"Usage $NAME $RESOURCE wait [options] <id>
+
+Options
+  -h, --help    print help
+  -             read $RESOURCE data from stdin
+  -t TIME, --timeout=TIME
+                wait for TIME"
+
+  while [[ $# > 0 ]]; do
+    case "$1" in
+      -t) timeout="$2"; shift ;;
+      --timeout=*) timeout="${1#--timeout=*}" ;;
+      -h|--help) echo "$help"; exit 1 ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  if [[ -n ${1+$1} ]]; then
+    while [[ $seconds -lt $timeout ]]; do
+      show | grep -q "$1" || break && sleep 1
+      ((seconds=$(date +%s)-start))
+    done
+    [[ $seconds -lt $timeout ]] || exit 1
+  else
+    error "missing $RESOURCE <id>"
+  fi
+}
+
+function request {
+  curl \
+    -sfSL \
+    -X "$1" \
+    ${MARATHON_USER+-u "$MARATHON_USER:$MARATHON_PASS"} \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    "$MARATHON_HOST/$2" \
+    ${3+-d "$3"}
+}
+
+function error {
+  printf "Error: %s\n" "$*" >&2
+}
+
+main "$@"
